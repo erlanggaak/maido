@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+/* Styling lives inline as Tailwind utilities; this file only holds tokens and keyframes. */
+@theme {
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-serif: Georgia, "Times New Roman", serif;
+  --color-ink: #4f4459;
+  --color-soft: #8a7b96;
+  --color-faint: #b3a6bd;
+  --color-lilac: #9781aa;
+  --color-lilac-dark: #7d6592;
+  --color-mist: #f1ebf6;
+  --animate-rise: rise .35s ease-out both;
+  --animate-dot: dot 1s ease-in-out infinite;
+}
+@keyframes rise { from { opacity: 0; transform: translateY(8px) } }
+@keyframes dot { 50% { opacity: .35; transform: translateY(-3px) } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important } }
