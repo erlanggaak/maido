@@ -41,6 +41,10 @@ interface Speech {
   cursor: number;
   pause: number;
   nextBeat: number;
+  /** More text may still arrive (a streaming reply); she waits instead of finishing. */
+  open: boolean;
+  /** Skipped while streaming: everything that arrives is shown at once. */
+  rushed: boolean;
   onProgress: (shown: number) => void;
   onDone: () => void;
 }
@@ -160,18 +164,48 @@ export class Director {
   }
   setThinking(value: boolean) { this.thinking = value; }
 
-  /** Starts "speaking" a reply: subtitles reveal, beats fire at their positions, mouth follows the text. */
+  /** Speaks a complete reply: subtitles reveal, beats fire at their positions, mouth follows the text. */
   speak(text: string, beats: Beat[], onProgress: (shown: number) => void, onDone: () => void) {
-    this.finishSpeech(false);
-    this.speech = { text, beats: [...beats].sort((a, b) => a.at - b.at), cursor: 0, pause: 0, nextBeat: 0, onProgress, onDone };
-    this.fireBeats();
+    this.beginSpeech(onProgress, onDone);
+    this.appendSpeech(text, beats);
+    this.closeSpeech();
   }
+  /** Starts a streaming reply; feed it with appendSpeech() and end it with closeSpeech(). */
+  beginSpeech(onProgress: (shown: number) => void, onDone: () => void) {
+    this.finishSpeech(false);
+    this.speech = { text: '', beats: [], cursor: 0, pause: 0, nextBeat: 0, open: true, rushed: false, onProgress, onDone };
+  }
+  appendSpeech(text: string, beats: Beat[] = []) {
+    const speech = this.speech;
+    if (!speech) return;
+    speech.text += text;
+    speech.beats.push(...beats);
+    if (speech.rushed) { speech.cursor = speech.text.length; speech.onProgress(speech.text.length); }
+    this.fireBeats(speech.rushed);
+  }
+  /** No more text is coming. `final` (the server's saved version) may tidy whitespace. */
+  closeSpeech(final?: { text: string; beats: Beat[] }) {
+    const speech = this.speech;
+    if (!speech) return;
+    if (final) {
+      speech.text = final.text;
+      // Keep beats already fired; take any the stream didn't carry (e.g. the default opening one).
+      speech.beats = [...final.beats].sort((a, b) => a.at - b.at);
+      speech.nextBeat = speech.beats.filter(beat => beat.at <= speech.cursor).length; // same rule fireBeats uses
+      speech.cursor = Math.min(speech.cursor, speech.text.length);
+    }
+    speech.open = false;
+    if (speech.rushed) this.skip();
+  }
+  /** Drops the current reply without finishing it (e.g. the user pressed Stop). */
+  cancelSpeech() { this.speech = null; }
   /** Reveals the rest of the reply immediately (still applies the last beat's emotion). */
   skip() {
     const speech = this.speech;
     if (!speech) return;
     speech.cursor = speech.text.length;
     this.fireBeats(true);
+    if (speech.open) { speech.rushed = true; speech.onProgress(speech.text.length); return; }
     this.finishSpeech(true);
   }
 
@@ -247,9 +281,10 @@ export class Director {
           speech.onProgress(now);
           this.fireBeats();
         }
-        viseme = visemeFor(speech.text[now] ?? '');
+        // Caught up with a reply that's still streaming: close the mouth and wait for more words.
+        viseme = now < speech.text.length ? visemeFor(speech.text[now] ?? '') : null;
       }
-      if (speech.cursor >= speech.text.length && speech.pause <= 0) this.finishSpeech(true);
+      if (!speech.open && speech.cursor >= speech.text.length && speech.pause <= 0) this.finishSpeech(true);
     }
     for (const v of VISEMES) {
       const goal = viseme === v ? 0.75 : viseme === 'consonant' && v === 'aa' ? 0.2 : 0;

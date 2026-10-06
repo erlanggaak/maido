@@ -3,7 +3,8 @@ import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { mkdir, readdir, stat, realpath } from 'node:fs/promises';
-import { EMOTIONS, GESTURE_PATTERN, generatePerformance, validateConfig, validateMessages } from './providers.mjs';
+import { BUILTIN_GESTURES, EMOTIONS, GESTURE_PATTERN, extractMemories, parseReply, persona, validateConfig, validateMessages } from './providers.mjs';
+import { StageStream, streamText } from './stream.mjs';
 import { contextFromHistory, createStore } from './characters.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -159,16 +160,43 @@ app.post('/api/chat', async (req, res) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error('timeout')), 90000);
   res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+  const friendly = error => controller.signal.aborted ? 'The request timed out. Try again.' : error.message === 'fetch failed' ? 'Could not reach the provider. Check your internet connection or local model server.' : error.message;
   try {
     const clipGestures = (await listAnimations().catch(() => [])).filter(clip => clip.kind === 'gesture').map(clip => clip.key);
-    const { notes, ...reply } = await generatePerformance({ ...config }, messages, controller.signal, { card, memories, profile, clipGestures });
-    if (controller.signal.aborted || res.destroyed) return; // the user pressed Stop: keep no half turn
-    const at = new Date().toISOString();
-    await store.appendHistory(card.id, [{ role: 'user', content: question.trim(), at }, { role: 'assistant', content: reply.text, beats: reply.beats, at }]);
-    const remembered = await store.addMemories(card.id, notes);
-    res.json({ ...reply, remembered });
+    const gestures = [...new Set([...BUILTIN_GESTURES, ...clipGestures])];
+    const deltas = streamText({ ...config }, messages, controller.signal, persona({ card, memories, gestures, profile }))[Symbol.asyncIterator]();
+    // Wait for the provider to accept the request before answering, so key/quota errors
+    // still come back as a normal HTTP error instead of a half-open stream.
+    let next = await deltas.next();
+    res.status(200).set({ 'Content-Type': 'application/x-ndjson; charset=utf-8', 'X-Accel-Buffering': 'no' });
+    res.flushHeaders();
+    const send = event => { if (!res.destroyed) res.write(`${JSON.stringify(event)}\n`); };
+    const stage = new StageStream(gestures);
+    let raw = '';
+    try {
+      // Newline-delimited JSON: {type:'text'|'beat'} while she speaks, then {type:'done'} or {type:'error'}.
+      for (; !next.done; next = await deltas.next()) {
+        raw += next.value;
+        if (raw.length > 14000) throw new Error('The reply was too long. Please ask for a shorter answer.');
+        for (const event of stage.push(next.value)) send(event);
+      }
+      for (const event of stage.end()) send(event);
+      if (controller.signal.aborted || res.destroyed) return; // the user pressed Stop: keep no half turn
+      // The saved turn comes from the complete reply, parsed in one go (same result as the stream).
+      const { text: spoken, notes } = extractMemories(raw.trim());
+      const reply = parseReply(spoken, gestures);
+      if (!reply.text) throw new Error('The model returned no text. Try another model or a shorter prompt.');
+      if (!reply.beats.length || reply.beats[0].at > 0) reply.beats.unshift({ at: 0, emotion: 'neutral', intensity: .5, gesture: 'none' });
+      const at = new Date().toISOString();
+      await store.appendHistory(card.id, [{ role: 'user', content: question.trim(), at }, { role: 'assistant', content: reply.text, beats: reply.beats, at }]);
+      const remembered = await store.addMemories(card.id, notes);
+      send({ type: 'done', ...reply, remembered });
+    } catch (error) {
+      send({ type: 'error', error: friendly(error) });
+    }
+    res.end();
   } catch (error) {
-    if (!res.destroyed) res.status(502).json({ error: controller.signal.aborted ? 'The request timed out. Try again.' : error.message === 'fetch failed' ? 'Could not reach the provider. Check your internet connection or local model server.' : error.message });
+    if (!res.destroyed && !res.headersSent) res.status(502).json({ error: friendly(error) });
   } finally { clearTimeout(timeout); busy = false; }
 });
 app.use('/api', (_req, res) => res.status(404).json({ error: 'Unknown API endpoint.' }));

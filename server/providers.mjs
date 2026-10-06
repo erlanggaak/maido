@@ -93,7 +93,8 @@ Express your own personality through emotions, faces, and gestures. Most sentenc
 Never mention, explain, or quote the tags, and never put them inside code blocks.`;
 }
 
-const REMEMBER = /<remember>([\s\S]*?)<\/remember>/gi;
+// Spaces after a note go too, so "Eh?! <remember>…</remember> Anyway" doesn't leave a double space.
+const REMEMBER = /<remember>([\s\S]*?)<\/remember>[ \t]*/gi;
 /** Pulls the character's own memory notes out of a reply (at most 3, each short). */
 export function extractMemories(raw) {
   const notes = [...raw.matchAll(REMEMBER)].map(match => match[1].replace(/\s+/g, ' ').trim()).filter(text => text && text.length <= 240).slice(0, 3);
@@ -101,6 +102,18 @@ export function extractMemories(raw) {
 }
 
 const TAG = /<mood\b([^>]*?)\/?>(?:\s*<\/mood>)?/gi;
+/** Turns a tag's attribute text (` emotion="happy" gesture="wave"`) into a validated beat. */
+export function beatFromTag(attributes, at, gestures = BUILTIN_GESTURES) {
+  const attrs = Object.fromEntries([...attributes.matchAll(/(\w+)\s*=\s*["']([^"']*)["']/g)].map(m => [m[1].toLowerCase(), m[2].trim().toLowerCase()]));
+  const intensity = Number.parseFloat(attrs.intensity);
+  return {
+    at,
+    emotion: EMOTIONS.includes(attrs.emotion) ? attrs.emotion : 'neutral',
+    intensity: Number.isFinite(intensity) ? Math.min(1, Math.max(.2, intensity)) : .6,
+    gesture: gestures.includes(attrs.gesture) ? attrs.gesture : 'none',
+    ...(Object.hasOwn(FACES, attrs.face ?? '') ? { face: attrs.face } : {}),
+  };
+}
 /** Splits a raw model reply into clean text plus timed body "beats" for the avatar. */
 export function parseReply(raw, gestures = BUILTIN_GESTURES) {
   const beats = [];
@@ -110,17 +123,9 @@ export function parseReply(raw, gestures = BUILTIN_GESTURES) {
   for (const match of raw.matchAll(TAG)) {
     text += segment(last, match.index);
     last = match.index + match[0].length;
-    const attrs = Object.fromEntries([...match[1].matchAll(/(\w+)\s*=\s*["']([^"']*)["']/g)].map(m => [m[1].toLowerCase(), m[2].trim().toLowerCase()]));
-    const intensity = Number.parseFloat(attrs.intensity);
     if (text.trim() === '') text = '';
     else if (!/\s$/.test(text)) text += ' ';
-    beats.push({
-      at: text.length,
-      emotion: EMOTIONS.includes(attrs.emotion) ? attrs.emotion : 'neutral',
-      intensity: Number.isFinite(intensity) ? Math.min(1, Math.max(.2, intensity)) : .6,
-      gesture: gestures.includes(attrs.gesture) ? attrs.gesture : 'none',
-      ...(Object.hasOwn(FACES, attrs.face ?? '') ? { face: attrs.face } : {}),
-    });
+    beats.push(beatFromTag(match[1], text.length, gestures));
   }
   text += segment(last);
   // Leading whitespace was dropped above; keep beat offsets aligned with the trimmed text.
@@ -184,32 +189,37 @@ export function validateMessages(messages) {
   return clean;
 }
 
-export async function generateReply(config, messages, signal, system = persona()) {
-  let url, body;
+/** Provider-specific endpoint, headers, and body; `stream` asks for server-sent events. */
+export function providerRequest(config, messages, system, stream = false) {
   const headers = { 'Content-Type': 'application/json' };
   if (config.provider === 'anthropic') {
-    url = 'https://api.anthropic.com/v1/messages';
     headers['x-api-key'] = config.apiKey;
     headers['anthropic-version'] = '2023-06-01';
-    body = { model: config.model, max_tokens: 1600, system, messages };
-  } else if (config.provider === 'openai') {
-    url = 'https://api.openai.com/v1/responses';
-    headers.Authorization = `Bearer ${config.apiKey}`;
-    body = { model: config.model, instructions: system, input: messages, max_output_tokens: 1600, store: false };
-  } else {
-    url = `${config.baseUrl}/chat/completions`;
-    if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
-    body = { model: config.model, messages: [{ role: 'system', content: system }, ...messages], max_tokens: 1600 };
+    return { url: 'https://api.anthropic.com/v1/messages', headers, body: { model: config.model, max_tokens: 1600, system, messages, ...(stream ? { stream } : {}) } };
   }
+  if (config.provider === 'openai') {
+    headers.Authorization = `Bearer ${config.apiKey}`;
+    return { url: 'https://api.openai.com/v1/responses', headers, body: { model: config.model, instructions: system, input: messages, max_output_tokens: 1600, store: false, ...(stream ? { stream } : {}) } };
+  }
+  if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
+  return { url: `${config.baseUrl}/chat/completions`, headers, body: { model: config.model, messages: [{ role: 'system', content: system }, ...messages], max_tokens: 1600, ...(stream ? { stream } : {}) } };
+}
+
+/** Sends the request; on failure, throws a safe message (provider error bodies may echo request data). */
+export async function providerFetch(config, messages, signal, system, stream = false) {
+  const { url, headers, body } = providerRequest(config, messages, system, stream);
   const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal, redirect: 'error' });
   if (!response.ok) {
-    // Provider error bodies can contain request data. Do not log or relay them.
     await response.body?.cancel();
     if ([401, 403].includes(response.status)) throw new Error('The provider rejected this key or model access. Check Settings.');
     if (response.status === 429) throw new Error('Provider quota or rate limit reached. Check your API billing or try again later.');
     throw new Error(`Provider returned HTTP ${response.status}. Check the model ID and API endpoint.`);
   }
-  const data = await response.json();
+  return response;
+}
+
+export async function generateReply(config, messages, signal, system = persona()) {
+  const data = await (await providerFetch(config, messages, signal, system)).json();
   let text;
   if (config.provider === 'anthropic') text = data.content?.filter(part => part.type === 'text').map(part => part.text).join('\n');
   else if (config.provider === 'openai') text = data.output?.filter(item => item.type === 'message').flatMap(item => item.content || []).filter(part => part.type === 'output_text').map(part => part.text).join('\n');
@@ -217,13 +227,4 @@ export async function generateReply(config, messages, signal, system = persona()
   if (typeof text !== 'string' || !text.trim()) throw new Error('The model returned no text. Try another model or a shorter prompt.');
   if (text.length > 12000) throw new Error('The reply was too long. Please ask for a shorter answer.');
   return text.trim();
-}
-
-export async function generatePerformance(config, messages, signal, { card, memories, profile, clipGestures = [] } = {}) {
-  const gestures = [...new Set([...BUILTIN_GESTURES, ...clipGestures])];
-  const { text: raw, notes } = extractMemories(await generateReply(config, messages, signal, persona({ card, memories, gestures, profile })));
-  const reply = parseReply(raw, gestures);
-  if (!reply.text) throw new Error('The model returned no text. Try another model or a shorter prompt.');
-  if (!reply.beats.length || reply.beats[0].at > 0) reply.beats.unshift({ at: 0, emotion: 'neutral', intensity: .5, gesture: 'none' });
-  return { ...reply, notes };
 }

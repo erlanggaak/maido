@@ -186,6 +186,17 @@ Use a model ID available to your API account. The sample OpenAI ID is a starting
 configuration, not a guarantee of access. This app does not connect through or
 reuse your ChatGPT/Claude desktop subscription session.
 
+### Streaming replies
+
+Replies stream: the server asks the provider for server-sent events (OpenAI Responses,
+Anthropic Messages, or OpenAI-compatible `chat/completions`) and forwards them to the page
+as newline-delimited JSON (`{type:'text'}`, `{type:'beat'}`, then `{type:'done'}` or
+`{type:'error'}`). Stage tags and memory notes are stripped while they arrive, even when a
+tag is split across chunks (`server/stream.mjs`, tested to match the one-shot parser under
+random chunking). She stops "thinking" and starts talking at the first word; if she catches
+up with the text, she waits with her mouth closed. The turn is saved only when the reply is
+complete, so **Stop** mid-reply keeps nothing and puts your message back in the composer.
+
 ## Conversation and privacy
 
 - English and Indonesian are requested in Maido's system instructions. Actual
@@ -244,6 +255,7 @@ src/Transcript.tsx       Full transcript panel (opened from the sidebar)
 src/storage.ts           Local conversation, model choice and preferences
 server/index.mjs         Local HTTP server, model catalog and API routes
 server/characters.mjs    Character cards, per-character history and memories
+server/stream.mjs        Provider streaming and incremental stage-tag parsing
 characters/              Character cards (JSON)
 memory/                  Per-character history and memories (ignored by Git)
 src/CharacterEditor.tsx  Character profile and memories editor

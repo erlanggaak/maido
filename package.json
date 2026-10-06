@@ -10,7 +10,7 @@
     "dev": "node --env-file-if-exists=.env server/index.mjs",
     "build": "tsc -b && vite build",
     "start": "node --env-file-if-exists=.env server/index.mjs --production",
-    "check": "tsc -b && node --check server/index.mjs && node --check server/providers.mjs && node --check server/characters.mjs",
+    "check": "tsc -b && node --check server/index.mjs && node --check server/providers.mjs && node --check server/characters.mjs && node --check server/stream.mjs",
     "test:integration": "node --test tests/server.test.mjs"
   },
   "dependencies": {

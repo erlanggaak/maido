@@ -6,7 +6,8 @@ import { once } from 'node:events';
 import { writeFile, unlink, symlink, mkdtemp, mkdir, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { generateReply, parseReply, validateConfig } from '../server/providers.mjs';
+import { extractMemories, generateReply, parseReply, validateConfig } from '../server/providers.mjs';
+import { StageStream, streamText } from '../server/stream.mjs';
 
 test('provider requests use the expected contracts and redact errors', async t => {
   const calls = [];
@@ -43,6 +44,51 @@ test('stage tags become body beats and never reach the visible text', () => {
   assert.deepEqual(unknown.beats, [{ at: 0, emotion: 'neutral', intensity: 1, gesture: 'none' }]);
 });
 
+test('streamed stage tags give exactly what the one-shot parser gives, however the text is chunked', () => {
+  const samples = [
+    '<mood emotion="happy" intensity="0.8" gesture="wave"/>Halo! Senang banget. <mood emotion="thinking" gesture="think"/> Hmm... <mood emotion="excited" gesture="cheer" face="joy"/>Okay!',
+    '  <mood emotion="sad"/>\n\nOh no.<remember>The user lost their keys.</remember>',
+    'No tags at all, but a < b and x<y and <b>bold</b> stay.',
+    '<mood emotion="happy" face="smug"></mood>Heh.<mood emotion="shy" face="embarrassed"/>Eh?! <remember>The user likes boba.</remember> Anyway.',
+  ];
+  let seed = 7;
+  const random = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (const raw of samples) {
+    const memory = extractMemories(raw);
+    const expected = parseReply(memory.text);
+    for (let trial = 0; trial < 200; trial++) {
+      const stage = new StageStream();
+      let text = ''; const beats = [];
+      const take = events => { for (const e of events) e.type === 'text' ? text += e.text : beats.push(e.beat); };
+      for (let i = 0; i < raw.length;) { const n = 1 + Math.floor(random() * 7); take(stage.push(raw.slice(i, i + n))); i += n; }
+      take(stage.end());
+      assert.equal(text.trim(), expected.text);
+      assert.deepEqual(beats, expected.beats);
+      assert.deepEqual(stage.notes, memory.notes);
+    }
+  }
+});
+
+test('reads OpenAI, Claude, and compatible streaming formats', async t => {
+  const sse = events => new Response(events.map(e => `event: x\ndata: ${typeof e === 'string' ? e : JSON.stringify(e)}\n\n`).join(''), { headers: { 'Content-Type': 'text/event-stream' } });
+  const bodies = {
+    openai: [{ type: 'response.created' }, { type: 'response.output_text.delta', delta: 'Hel' }, { type: 'response.output_text.delta', delta: 'lo' }, { type: 'response.completed' }],
+    anthropic: [{ type: 'message_start' }, { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hel' } }, { type: 'content_block_delta', delta: { type: 'text_delta', text: 'lo' } }, { type: 'message_stop' }],
+    compatible: [{ choices: [{ delta: { role: 'assistant' } }] }, { choices: [{ delta: { content: 'Hel' } }] }, { choices: [{ delta: { content: 'lo' } }] }, '[DONE]'],
+  };
+  const sent = [];
+  const fake = mock.method(globalThis, 'fetch', async (url, init) => { sent.push(JSON.parse(init.body)); return sse(bodies[url.includes('anthropic') ? 'anthropic' : url.includes('openai') ? 'openai' : 'compatible']); });
+  t.after(() => fake.mock.restore());
+  for (const provider of ['openai', 'anthropic', 'compatible']) {
+    let text = '';
+    for await (const delta of streamText({ provider, model: 'm', apiKey: 'k', baseUrl: 'https://example.com/v1' }, [{ role: 'user', content: 'hi' }], undefined, 'system')) text += delta;
+    assert.equal(text, 'Hello', provider);
+    assert.equal(sent.at(-1).stream, true);
+  }
+  fake.mock.mockImplementation(async () => sse([{ type: 'response.output_text.delta', delta: 'Hi' }, { type: 'response.failed' }]));
+  await assert.rejects(async () => { for await (const _ of streamText({ provider: 'openai', model: 'm', apiKey: 'k' }, [], undefined, 's')); }, /stopped before finishing/);
+});
+
 test('changing a key destination cannot reuse the previous credential', () => {
   const previous = { provider: 'openai', model: 'model', apiKey: 'private-test-key', baseUrl: '' };
   assert.throws(() => validateConfig({ provider: 'anthropic', model: 'model' }, previous), /API key/);
@@ -68,10 +114,23 @@ test('local HTTP server: chat, validation, origin protection, cancellation, and 
       return;
     }
     if (question === 'error') { res.writeHead(429); res.end('Do not expose provider details'); return; }
-    res.setHeader('Content-Type', 'application/json');
+    if (question === 'broken stream') {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Half a sen' } }] })}\n\n`);
+      res.end(`data: ${JSON.stringify({ error: { message: 'secret upstream detail' } })}\n\n`);
+      return;
+    }
     const content = question === 'My cat is Mochi'
       ? '<mood emotion="happy" intensity="0.8" gesture="none" face="love"/>Mochi! Cute name. <remember>The user has a cat named Mochi.</remember>'
       : `Mock reply: ${question}`;
+    if (upstreamRequest.body.stream) {
+      // Stream in 3-character pieces, so stage tags arrive split across chunks.
+      res.setHeader('Content-Type', 'text/event-stream');
+      for (let i = 0; i < content.length; i += 3) res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: content.slice(i, i + 3) } }] })}\n\n`);
+      res.end('data: [DONE]\n\n');
+      return;
+    }
+    res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ choices: [{ message: { content } }] }));
   });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
@@ -155,11 +214,21 @@ test('local HTTP server: chat, validation, origin protection, cancellation, and 
     const value = await result.text(); assert.ok(!value.includes('local-test-key')); assert.equal(JSON.parse(value).hasKey, true);
   });
   const chat = (message, characterId = 'tester', options) => post('/api/chat', { characterId, message }, options);
+  /** Reads a streamed reply: text pieces, beats, and the final done/error event. */
+  const stream = async response => {
+    const events = (await response.text()).trim().split('\n').map(line => JSON.parse(line));
+    return { events, text: events.filter(e => e.type === 'text').map(e => e.text).join(''), beats: events.filter(e => e.type === 'beat').map(e => e.beat), last: events.at(-1) };
+  };
+  /** Sends a message and waits for the whole streamed reply (the server saves the turn at the end). */
+  const say = async (...args) => stream(await chat(...args));
   const history = async id => (await (await fetch(`${base}/api/characters/${id}/history`)).json()).messages;
   await t.test('chats as the character, from her saved history', async () => {
     const first = await chat('Hello');
-    const reply = await first.json();
-    assert.equal(first.status, 200); assert.equal(reply.text, 'Mock reply: Hello');
+    assert.equal(first.status, 200); assert.match(first.headers.get('content-type'), /ndjson/);
+    const { last: reply, events } = await stream(first);
+    assert.ok(events.length > 3, 'arrives in pieces');
+    assert.equal(reply.type, 'done'); assert.equal(reply.text, 'Mock reply: Hello');
+    assert.equal(upstreamRequest.body.stream, true);
     assert.deepEqual(reply.beats, [{ at: 0, emotion: 'neutral', intensity: .5, gesture: 'none' }]);
     assert.deepEqual(reply.remembered, []);
     assert.equal(upstreamRequest.path, '/v1/chat/completions');
@@ -171,30 +240,34 @@ test('local HTTP server: chat, validation, origin protection, cancellation, and 
     assert.match(system.content, /gesture: none, wave \(greeting or goodbye\)/);
     assert.match(system.content, /face \(optional.*smug \(smug, teasing\)/);
     // The second turn is built by the server from her history, with her earlier body tag re-attached.
-    await chat('Apa kabar?');
+    await say('Apa kabar?');
     assert.deepEqual(upstreamRequest.body.messages.slice(1).map(m => m.role), ['user', 'assistant', 'user']);
     assert.equal(upstreamRequest.body.messages[2].content, '<mood emotion="neutral" intensity="0.5" gesture="none"/>Mock reply: Hello');
     assert.equal(upstreamRequest.body.messages[3].content, 'Apa kabar?');
     assert.equal((await history('tester')).length, 4);
   });
   await t.test('keeps memories she writes herself, per character', async () => {
-    const reply = await (await chat('My cat is Mochi')).json();
+    const live = await stream(await chat('My cat is Mochi'));
+    const reply = live.last;
+    // While streaming, tags never reach the visible text and the face cue arrives as a beat.
+    assert.equal(live.text.trim(), 'Mochi! Cute name.');
+    assert.deepEqual(live.beats.map(beat => beat.face), ['love']);
     assert.equal(reply.text, 'Mochi! Cute name.');
     assert.equal(reply.beats[0].face, 'love');
     assert.deepEqual(reply.remembered.map(m => m.text), ['The user has a cat named Mochi.']);
     const { memories } = await (await fetch(`${base}/api/characters/tester/memories`)).json();
     assert.equal(memories.length, 1);
-    await chat('What do you remember?');
+    await say('What do you remember?');
     assert.match(upstreamRequest.body.messages[0].content, /What you remember about the user[\s\S]*cat named Mochi/);
     // Another character has her own (empty) history and no memory of Mochi.
-    await chat('Hi', 'other');
+    await say('Hi', 'other');
     assert.doesNotMatch(upstreamRequest.body.messages[0].content, /Mochi/);
     assert.equal(upstreamRequest.body.messages.length, 2);
     // (The prompt's own example note must never plant a fake memory either.)
     assert.equal((await history('other')).length, 2);
     // Forgetting removes it from her next conversation.
     assert.equal((await fetch(`${base}/api/characters/tester/memories/${memories[0].id}`, { method: 'DELETE' })).status, 200);
-    await chat('Still remember?');
+    await say('Still remember?');
     assert.doesNotMatch(upstreamRequest.body.messages[0].content, /Mochi/);
   });
   await t.test('every character knows the user from their profile', async () => {
@@ -205,7 +278,7 @@ test('local HTTP server: chat, validation, origin protection, cancellation, and 
     assert.deepEqual(await (await fetch(`${base}/api/profile`)).json(), saved);
     assert.equal(JSON.parse(await readFile(path.join(data, 'memory', 'you.json'), 'utf8')).callMe, 'Raka');
     for (const id of ['tester', 'other']) {
-      await chat('Hai', id);
+      await say('Hai', id);
       const system = upstreamRequest.body.messages[0].content;
       assert.match(system, /Who you are talking with[\s\S]*Name: Raka Pratama\nCall them: Raka\nLives in: Jakarta[\s\S]*Straight to the point\./);
       assert.match(system, /## Right now\nIt is \w+day, \d+ \w+ \d{4}/);
@@ -218,6 +291,11 @@ test('local HTTP server: chat, validation, origin protection, cancellation, and 
     assert.equal((await fetch(`${base}/api/characters/..%2Fcharacters%2Ftester/history`)).status, 404);
     const result = await chat('error');
     assert.equal(result.status, 502); assert.match((await result.json()).error, /quota/);
+    // A stream that fails midway ends with a safe error event and saves nothing.
+    const before = (await history('tester')).length;
+    const broken = await stream(await chat('broken stream'));
+    assert.equal(broken.last.type, 'error'); assert.doesNotMatch(broken.last.error, /secret/);
+    assert.equal((await history('tester')).length, before);
   });
   await t.test('creates, edits, and deletes characters', async () => {
     const created = await post('/api/characters', { name: 'Nova Star', gender: 'male', model: 'nova.vrm', restingMood: 'excited', restingFace: 'grin' });

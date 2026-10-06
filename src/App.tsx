@@ -42,6 +42,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [speech, setSpeech] = useState<{ text: string; shown: number; beats: Beat[] } | null>(null);
   const [speaking, setSpeaking] = useState(false);
+  /** The reply has started arriving: she stops "thinking" and starts talking. */
+  const [streaming, setStreaming] = useState(false);
+  const speechId = useRef(0);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [asset, setAsset] = useState<AvatarAsset | null>(null);
@@ -90,7 +93,7 @@ export default function App() {
     d.autoEmotion = prefs.autoEmotion; d.idleLife = prefs.idleLife;
     savePrefs(prefs);
   }, [prefs]);
-  useEffect(() => { director.current.setThinking(busy); }, [busy]);
+  useEffect(() => { director.current.setThinking(busy && !streaming); }, [busy, streaming]);
   // Clips load asynchronously inside the viewer; read the playable gesture list when settings open.
   useEffect(() => { if (sidebarOpen) setGestures(director.current.gestures()); }, [sidebarOpen, clips]);
   useEffect(() => { if (!notice) return; const timer = setTimeout(() => setNotice(''), 5000); return () => clearTimeout(timer); }, [notice]);
@@ -144,31 +147,74 @@ export default function App() {
     return you ? text.replace(/\{user\}/g, you) : text.replace(/[ ,]*\{user\}/g, '');
   }
 
-  function speak(text: string, beats: Beat[]) {
-    setSpeech({ text, shown: 0, beats }); setSpeaking(true);
-    director.current.speak(text, beats, shown => setSpeech(s => s && s.text === text ? { ...s, shown } : s), () => setSpeaking(false));
+  // Speech in three steps so a streamed reply can start talking at its first word.
+  function beginSpeech() {
+    const id = ++speechId.current;
+    setSpeech({ text: '', shown: 0, beats: [] }); setSpeaking(true);
+    director.current.beginSpeech(
+      shown => { if (speechId.current === id) setSpeech(s => s && { ...s, shown }); },
+      () => { if (speechId.current === id) setSpeaking(false); },
+    );
   }
+  function appendSpeech(text: string, beats: Beat[] = []) {
+    setSpeech(s => s && { ...s, text: s.text + text, beats: [...s.beats, ...beats] });
+    director.current.appendSpeech(text, beats);
+  }
+  function endSpeech(final?: { text: string; beats: Beat[] }) {
+    if (final) setSpeech(s => s && { ...s, text: final.text, beats: final.beats });
+    director.current.closeSpeech(final);
+  }
+  function speak(text: string, beats: Beat[]) { beginSpeech(); appendSpeech(text, beats); endSpeech(); }
 
   async function send(question = input.trim()) {
     if (!question || inFlight.current) return;
     if (!config.configured) { setSidebarOpen(true); setNotice('Connect a brain first.'); return; }
     if (question.length > 12000) { setError('Please keep your message under 12,000 characters.'); return; }
     director.current.skip();
-    inFlight.current = true; setBusy(true); setPending(question); setInput(''); setError(''); setSpeech(null);
+    inFlight.current = true; setBusy(true); setStreaming(false); setPending(question); setInput(''); setError(''); setSpeech(null);
     const controller = new AbortController(); requestController.current = controller;
+    let started = false;
     try {
       if (!active) throw new Error('Choose a character in Settings first.');
-      const reply = await request<{ text: string; beats: Beat[]; remembered: Memory[] }>('/api/chat', { characterId: active.id, message: question }, controller.signal);
+      const response = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ characterId: active.id, message: question }), signal: controller.signal });
+      if (!response.ok || !response.body) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(outdated(new Error(data.error || 'Something went wrong. Please try again.')));
+      }
+      // Newline-delimited JSON: text pieces and beats while she speaks, then done (or error).
+      type Event = { type: 'text'; text: string } | { type: 'beat'; beat: Beat } | { type: 'done'; text: string; beats: Beat[]; remembered: Memory[] } | { type: 'error'; error: string };
+      let final: Extract<Event, { type: 'done' }> | null = null;
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      for (let buffer = '';;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += value;
+        for (let newline = buffer.indexOf('\n'); newline >= 0; newline = buffer.indexOf('\n')) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          const event = JSON.parse(line) as Event;
+          if (event.type === 'error') throw new Error(event.error);
+          if (event.type === 'done') { final = event; continue; }
+          if (!started) { started = true; setStreaming(true); beginSpeech(); }
+          if (event.type === 'text') appendSpeech(event.text);
+          else appendSpeech('', [event.beat]);
+        }
+      }
+      if (!final) throw new Error('The reply was cut off. Please try again.');
+      if (!started) beginSpeech();
+      endSpeech(final);
       const at = new Date().toISOString();
-      setMessages(current => [...current, { role: 'user', content: question, at }, { role: 'assistant', content: reply.text, beats: reply.beats, at }]);
-      speak(reply.text, reply.beats);
-      if (reply.remembered.length) setNotice(`💭 ${name} will remember: ${reply.remembered.map(memory => memory.text).join(' · ')}`);
+      setMessages(current => [...current, { role: 'user', content: question, at }, { role: 'assistant', content: final.text, beats: final.beats, at }]);
+      if (final.remembered.length) setNotice(`💭 ${name} will remember: ${final.remembered.map(memory => memory.text).join(' · ')}`);
     } catch (e) {
+      // Nothing was saved for this turn, so take back the half-spoken reply too.
+      if (started) { director.current.cancelSpeech(); speechId.current++; setSpeech(null); setSpeaking(false); }
       setInput(question);
       if (controller.signal.aborted) setNotice('Stopped. Your message is back in the composer.');
       else { setError(e instanceof Error ? e.message : 'Could not send this message.'); director.current.feel('sad', .5, 4); }
     } finally {
-      inFlight.current = false; requestController.current = null; setBusy(false); setPending('');
+      inFlight.current = false; requestController.current = null; setBusy(false); setStreaming(false); setPending('');
       setTimeout(() => composer.current?.focus(), 0);
     }
   }
@@ -207,7 +253,7 @@ export default function App() {
     return result.characters;
   }
 
-  const mood = busy ? 'thinking' : speech?.beats.findLast(b => b.at <= speech.shown)?.emotion ?? active?.restingMood ?? 'neutral';
+  const mood = busy && !streaming ? 'thinking' : speech?.beats.findLast(b => b.at <= speech.shown)?.emotion ?? active?.restingMood ?? 'neutral';
 
   const bg = prefs.background;
   return <div className="relative h-dvh w-full overflow-clip font-sans text-ink antialiased transition-[background] duration-500 selection:bg-[#e4d7ef]"
@@ -222,7 +268,7 @@ export default function App() {
 
     <header className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-start justify-between p-5 sm:p-7">
       <p className="pointer-events-auto flex items-center gap-1.5 rounded-full bg-white/70 px-3.5 py-2 text-xs text-soft capitalize shadow-sm ring-1 ring-white backdrop-blur" role="status" aria-label={`Mood: ${mood}`}>
-        <span aria-hidden className={busy ? 'animate-pulse' : ''}>{EMOTION_ICON[mood]}</span>{mood}
+        <span aria-hidden className={busy && !streaming ? 'animate-pulse' : ''}>{EMOTION_ICON[mood]}</span>{mood}
       </p>
       <button className="pointer-events-auto inline-flex items-center gap-2 rounded-full bg-white/70 px-4 py-2.5 text-xs text-soft shadow-sm ring-1 ring-white backdrop-blur hover:bg-white" onClick={() => setSidebarOpen(true)} aria-label="Open settings" aria-expanded={sidebarOpen}>
         <Settings2 size={16} />Settings
@@ -230,9 +276,9 @@ export default function App() {
     </header>
 
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-3 px-4 pb-5 sm:pb-7">
-      {busy && pending && <p className="animate-rise max-w-xl truncate rounded-full bg-white/60 px-4 py-1.5 text-xs text-soft backdrop-blur">You: {pending}</p>}
-      {busy && <div className="flex gap-1.5 py-2" aria-label={`${name} is thinking`}>{[0, 1, 2].map(i => <span key={i} className="size-1.5 animate-dot rounded-full bg-lilac/60" style={{ animationDelay: `${i * .15}s` }} />)}</div>}
-      {speech && !busy && <div className="pointer-events-auto animate-rise w-full max-w-2xl rounded-3xl rounded-bl-md bg-white/85 text-ink shadow-[0_10px_40px_#5c427016] ring-1 ring-white backdrop-blur-md">
+      {busy && !streaming && pending && <p className="animate-rise max-w-xl truncate rounded-full bg-white/60 px-4 py-1.5 text-xs text-soft backdrop-blur">You: {pending}</p>}
+      {busy && !streaming && <div className="flex gap-1.5 py-2" aria-label={`${name} is thinking`}>{[0, 1, 2].map(i => <span key={i} className="size-1.5 animate-dot rounded-full bg-lilac/60" style={{ animationDelay: `${i * .15}s` }} />)}</div>}
+      {speech && (!busy || streaming) && <div className="pointer-events-auto animate-rise w-full max-w-2xl rounded-3xl rounded-bl-md bg-white/85 text-ink shadow-[0_10px_40px_#5c427016] ring-1 ring-white backdrop-blur-md">
         <div className={`flex items-center gap-2 px-6 ${folded ? 'py-2.5' : 'pt-3'}`}>
           <span className="text-[10px] font-semibold tracking-[.16em] text-lilac uppercase">{name}</span>
           {/* Folded: the reply collapses to one line; click it (or the chevron) to read it all. */}
