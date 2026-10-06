@@ -268,3 +268,15 @@ three-vrm, and a small Express server.
 Browser assets are bundled locally; the UI needs no font CDN or remote image.
 Future local speech can be a separate Python/Apple Silicon service without
 changing the avatar renderer.
+
+## Source formatting and performance
+
+Run `npm run format` to format source, or `npm run format:check` to verify it.
+The chat components and stream decoder live in `src/chat/`, provider settings in
+`src/settings/`, and avatar pose composition in `src/avatar/rig.ts`.
+
+For local frame measurements, add `?profile` to the app URL, wait for the VRM and
+animations to load, then run `maidoPerformance.reset()` in browser DevTools. After
+at least 35 seconds with the page visible, read `maidoPerformance.snapshot()`.
+These timings measure CPU work and WebGL submission, not GPU execution or RAM usage.
+See [the measured before/after report](docs/performance/2026-10-07.md) for conditions and limits.

@@ -2,7 +2,10 @@ import * as THREE from 'three';
 import type { VRM } from '@pixiv/three-vrm';
 
 export type PhysicsStyle = 'model' | 'soft' | 'bouncy';
-export interface PhysicsPrefs { style: PhysicsStyle; wind: boolean }
+export interface PhysicsPrefs {
+  style: PhysicsStyle;
+  wind: boolean;
+}
 
 /** Secondary parts that should flow: hair, skirt, tails, ribbons… (not bust or sleeve stiffeners). */
 const FLOWING = /hair|skirt|tail|ribbon|coat|cloth|cape|ear|hood|tie|scarf|frill/i;
@@ -14,8 +17,18 @@ const STYLES: Record<PhysicsStyle, { stiffness: number; drag: number; gravity: n
 };
 
 interface JointState {
-  settings: { stiffness: number; dragForce: number; gravityPower: number; gravityDir: THREE.Vector3 };
-  original: { stiffness: number; dragForce: number; gravityPower: number; gravityDir: THREE.Vector3 };
+  settings: {
+    stiffness: number;
+    dragForce: number;
+    gravityPower: number;
+    gravityDir: THREE.Vector3;
+  };
+  original: {
+    stiffness: number;
+    dragForce: number;
+    gravityPower: number;
+    gravityDir: THREE.Vector3;
+  };
   flowing: boolean;
   phase: number;
 }
@@ -35,24 +48,36 @@ export class SpringTuner {
       const s = joint.settings;
       this.joints.push({
         settings: s,
-        original: { stiffness: s.stiffness, dragForce: s.dragForce, gravityPower: s.gravityPower, gravityDir: s.gravityDir.clone() },
+        original: {
+          stiffness: s.stiffness,
+          dragForce: s.dragForce,
+          gravityPower: s.gravityPower,
+          gravityDir: s.gravityDir.clone(),
+        },
         flowing: FLOWING.test(joint.bone.name),
         phase: joint.bone.position.x * 7 + joint.bone.position.y * 3,
       });
     }
   }
 
-  get count() { return this.joints.length; }
+  get count() {
+    return this.joints.length;
+  }
 
   update(prefs: PhysicsPrefs, time: number) {
     const style = STYLES[prefs.style];
     // A slow-turning breeze from the front with soft gusts; never fully still, never a storm.
-    const gust = prefs.wind ? 0.03 + 0.05 * Math.max(0, Math.sin(time * 0.5) * Math.sin(time * 1.3 + 1)) : 0;
+    const gust = prefs.wind
+      ? 0.03 + 0.05 * Math.max(0, Math.sin(time * 0.5) * Math.sin(time * 1.3 + 1))
+      : 0;
     const angle = Math.sin(time * 0.13) * 0.6;
     for (const joint of this.joints) {
       const { original: o, settings: s } = joint;
       if (!joint.flowing) {
-        s.stiffness = o.stiffness; s.dragForce = o.dragForce; s.gravityPower = o.gravityPower; s.gravityDir.copy(o.gravityDir);
+        s.stiffness = o.stiffness;
+        s.dragForce = o.dragForce;
+        s.gravityPower = o.gravityPower;
+        s.gravityDir.copy(o.gravityDir);
         continue;
       }
       s.stiffness = o.stiffness * style.stiffness;
@@ -71,7 +96,10 @@ export class SpringTuner {
   /** Puts every joint back to the model's own values. */
   restore() {
     for (const { original: o, settings: s } of this.joints) {
-      s.stiffness = o.stiffness; s.dragForce = o.dragForce; s.gravityPower = o.gravityPower; s.gravityDir.copy(o.gravityDir);
+      s.stiffness = o.stiffness;
+      s.dragForce = o.dragForce;
+      s.gravityPower = o.gravityPower;
+      s.gravityDir.copy(o.gravityDir);
     }
   }
 }

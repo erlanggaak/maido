@@ -1,0 +1,56 @@
+{
+  "sampleFrames": 616,
+  "warmupMs": 5000,
+  "visible": true,
+  "model": "AvatarSample_D.vrm",
+  "clips": 8,
+  "viewport": {
+    "width": 1280,
+    "height": 720,
+    "pixelRatio": 1.75
+  },
+  "observedFps": 30.001463486023713,
+  "timings": {
+    "director": {
+      "averageMs": 0.08831168829717419,
+      "p50Ms": 0.09999999403953552,
+      "p95Ms": 0.20000000298023224,
+      "maxMs": 0.30000001192092896
+    },
+    "body": {
+      "averageMs": 1.2678571429780938,
+      "p50Ms": 1.2000000029802322,
+      "p95Ms": 1.5999999940395355,
+      "maxMs": 2.7999999970197678
+    },
+    "effects": {
+      "averageMs": 0.018506493612930372,
+      "p50Ms": 0,
+      "p95Ms": 0.10000000894069672,
+      "maxMs": 0.10000000894069672
+    },
+    "render": {
+      "averageMs": 1.4073051942343062,
+      "p50Ms": 1.3999999910593033,
+      "p95Ms": 1.7000000029802322,
+      "maxMs": 2.9000000059604645
+    },
+    "total": {
+      "averageMs": 2.7819805191225044,
+      "p50Ms": 2.7000000029802322,
+      "p95Ms": 3.2999999970197678,
+      "maxMs": 6
+    },
+    "interval": {
+      "averageMs": 33.33170731707317,
+      "p50Ms": 33.3999999910593,
+      "p95Ms": 34,
+      "maxMs": 35.70000000298023
+    }
+  },
+  "drawCalls": 35,
+  "triangles": 81783,
+  "geometries": 41,
+  "textures": 48,
+  "shaderPrograms": 19
+}

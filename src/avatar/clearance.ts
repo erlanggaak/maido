@@ -17,7 +17,13 @@ const MAX_ANGLE = 0.35;
 /** Light contact (a hand resting on a skirt) is natural; only correct real sinking. */
 const TOLERANCE = 0.012;
 
-interface Side { sign: 1 | -1; upper: THREE.Object3D; lower: THREE.Object3D; hand: THREE.Object3D; angle: number }
+interface Side {
+  sign: 1 | -1;
+  upper: THREE.Object3D;
+  lower: THREE.Object3D;
+  hand: THREE.Object3D;
+  angle: number;
+}
 
 export class ArmClearance {
   /** key "yBin,zBin" → furthest body extent on that side (hips space, metres). */
@@ -30,13 +36,17 @@ export class ArmClearance {
   private shoulder = new THREE.Vector3();
   private points = Array.from({ length: 5 }, () => new THREE.Vector3());
   private rotated = new THREE.Vector3();
+  private correction = new THREE.Quaternion();
   /** Diagnostics: angles applied on the last frame (radians). */
   readonly last = { left: 0, right: 0 };
 
   constructor(private vrm: VRM) {
     const h = vrm.humanoid;
     this.hips = h.getNormalizedBoneNode(VRMHumanBoneName.Hips)!;
-    for (const [sign, prefix] of [[1, 'left'], [-1, 'right']] as const) {
+    for (const [sign, prefix] of [
+      [1, 'left'],
+      [-1, 'right'],
+    ] as const) {
       const upper = h.getNormalizedBoneNode(`${prefix}UpperArm` as VRMHumanBoneName);
       const lower = h.getNormalizedBoneNode(`${prefix}LowerArm` as VRMHumanBoneName);
       const hand = h.getNormalizedBoneNode(`${prefix}Hand` as VRMHumanBoneName);
@@ -57,7 +67,7 @@ export class ArmClearance {
     const forearm = elbow && wrist ? new THREE.Line3(elbow, wrist) : null;
     const distances: number[] = [];
     const closest = new THREE.Vector3();
-    vrm.scene.traverse(object => {
+    vrm.scene.traverse((object) => {
       const mesh = object as THREE.SkinnedMesh;
       if (!mesh.isSkinnedMesh) return;
       const position = mesh.geometry.getAttribute('position');
@@ -68,8 +78,15 @@ export class ArmClearance {
       const step = position.count > 30000 ? 3 : 2;
       for (let i = 0; i < position.count; i += step) {
         // Classify a vertex by the bone that moves it most.
-        let best = 0, bone = index.getX(i);
-        for (let k = 0; k < 4; k++) { const w = weight.getComponent(i, k); if (w > best) { best = w; bone = index.getComponent(i, k); } }
+        let best = 0,
+          bone = index.getX(i);
+        for (let k = 0; k < 4; k++) {
+          const w = weight.getComponent(i, k);
+          if (w > best) {
+            best = w;
+            bone = index.getComponent(i, k);
+          }
+        }
         const name = bones[bone]?.name ?? '';
         mesh.getVertexPosition(i, this.v);
         mesh.localToWorld(this.v);
@@ -91,7 +108,11 @@ export class ArmClearance {
     if (distances.length > 20) {
       distances.sort((a, b) => a - b);
       // The inner third of forearm vertices is the arm itself; wide sleeves are cloth and may overlap.
-      this.radius = THREE.MathUtils.clamp(distances[Math.floor(distances.length * 0.33)], 0.018, 0.05);
+      this.radius = THREE.MathUtils.clamp(
+        distances[Math.floor(distances.length * 0.33)],
+        0.018,
+        0.05,
+      );
     }
   }
 
@@ -99,7 +120,8 @@ export class ArmClearance {
   private depth(p: THREE.Vector3, side: Side) {
     if (p.x * side.sign <= 0) return 0; // crossed the midline on purpose (e.g. clasped hands)
     const table = this.profile[side.sign === 1 ? 0 : 1];
-    const y = Math.round(p.y / BIN), z = Math.round(p.z / BIN);
+    const y = Math.round(p.y / BIN),
+      z = Math.round(p.z / BIN);
     let reach = 0;
     for (let dy = -1; dy <= 1; dy++) reach = Math.max(reach, table.get(`${y + dy},${z}`) ?? 0);
     return reach > 0 ? reach + this.radius - Math.abs(p.x) : 0;
@@ -114,27 +136,39 @@ export class ArmClearance {
       if (enabled) {
         side.hand.updateWorldMatrix(true, false);
         this.shoulder.setFromMatrixPosition(side.upper.matrixWorld).applyMatrix4(this.inverse);
-        const elbow = this.points[0].setFromMatrixPosition(side.lower.matrixWorld).applyMatrix4(this.inverse);
-        const wrist = this.points[2].setFromMatrixPosition(side.hand.matrixWorld).applyMatrix4(this.inverse);
+        const elbow = this.points[0]
+          .setFromMatrixPosition(side.lower.matrixWorld)
+          .applyMatrix4(this.inverse);
+        const wrist = this.points[2]
+          .setFromMatrixPosition(side.hand.matrixWorld)
+          .applyMatrix4(this.inverse);
         this.points[1].lerpVectors(elbow, wrist, 0.5);
         this.points[3].lerpVectors(this.shoulder, elbow, 0.75);
         // Palm (not fingertips: those may rest on clothes): a quarter hand-length past the wrist.
         this.points[4].subVectors(wrist, elbow).multiplyScalar(0.25).add(wrist);
         // Smallest outward swing (about the body's forward axis, around the shoulder) that clears every point.
         for (let angle = 0; angle <= MAX_ANGLE; angle += 0.02) {
-          const c = Math.cos(angle * side.sign), s = Math.sin(angle * side.sign);
-          const clear = this.points.every(p => {
-            const x = p.x - this.shoulder.x, y = p.y - this.shoulder.y;
+          const c = Math.cos(angle * side.sign),
+            s = Math.sin(angle * side.sign);
+          const clear = this.points.every((p) => {
+            const x = p.x - this.shoulder.x,
+              y = p.y - this.shoulder.y;
             this.rotated.set(this.shoulder.x + x * c - y * s, this.shoulder.y + x * s + y * c, p.z);
             return this.depth(this.rotated, side) <= TOLERANCE;
           });
-          if (clear) { needed = angle; break; }
+          if (clear) {
+            needed = angle;
+            break;
+          }
           needed = angle;
         }
       }
       // Glide, so a gesture passing near the hips doesn't make the arm twitch.
       side.angle += (needed - side.angle) * (1 - Math.exp(-(needed > side.angle ? 14 : 4) * dt));
-      if (side.angle > 0.001) side.upper.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(AXIS, side.angle * side.sign));
+      if (side.angle > 0.001)
+        side.upper.quaternion.premultiply(
+          this.correction.setFromAxisAngle(AXIS, side.angle * side.sign),
+        );
       this.last[side.sign === 1 ? 'left' : 'right'] = side.angle;
     }
   }

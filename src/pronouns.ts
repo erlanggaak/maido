@@ -6,4 +6,7 @@ export function pronouns(gender: Gender = 'female') {
     ? { they: 'he', them: 'him', their: 'his', themselves: 'himself', They: 'He', Their: 'His' }
     : { they: 'she', them: 'her', their: 'her', themselves: 'herself', They: 'She', Their: 'Her' };
 }
-export const GENDER_LABEL: Record<Gender, string> = { female: 'Female (she/her)', male: 'Male (he/him)' };
+export const GENDER_LABEL: Record<Gender, string> = {
+  female: 'Female (she/her)',
+  male: 'Male (he/him)',
+};

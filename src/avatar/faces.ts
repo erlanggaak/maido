@@ -17,7 +17,9 @@ export class FaceRig {
     const manager = vrm.expressionManager;
     if (!manager) return;
     const meshes: THREE.Mesh[] = [];
-    vrm.scene.traverse(object => { if ((object as THREE.Mesh).morphTargetDictionary) meshes.push(object as THREE.Mesh); });
+    vrm.scene.traverse((object) => {
+      if ((object as THREE.Mesh).morphTargetDictionary) meshes.push(object as THREE.Mesh);
+    });
     for (const [face, recipe] of Object.entries(FACES) as [Face, FaceRecipe][]) {
       const morphs = Object.entries(recipe.morphs);
       if (!morphs.length) continue;
@@ -30,7 +32,10 @@ export class FaceRig {
           const index = mesh.morphTargetDictionary?.[morph];
           if (index !== undefined) byIndex.set(index, [...(byIndex.get(index) ?? []), mesh]);
         }
-        for (const [index, primitives] of byIndex) { expression.addBind(new VRMExpressionMorphTargetBind({ primitives, index, weight })); bound++; }
+        for (const [index, primitives] of byIndex) {
+          expression.addBind(new VRMExpressionMorphTargetBind({ primitives, index, weight }));
+          bound++;
+        }
       }
       // Only use the native face if most of its recipe exists on this model.
       if (bound >= Math.ceil(morphs.length * 0.6)) {
@@ -45,11 +50,21 @@ export class FaceRig {
   apply(faces: Partial<Record<Face, number>>, extra: Record<string, number>) {
     const manager = this.vrm.expressionManager;
     if (!manager) return;
-    const presets: Record<string, number> = { happy: 0, angry: 0, sad: 0, relaxed: 0, surprised: 0, blinkLeft: 0, blinkRight: 0 };
+    const presets: Record<string, number> = {
+      happy: 0,
+      angry: 0,
+      sad: 0,
+      relaxed: 0,
+      surprised: 0,
+      blinkLeft: 0,
+      blinkRight: 0,
+    };
     for (const face of Object.keys(FACES) as Face[]) {
       const weight = faces[face] ?? 0;
       if (this.native.has(face)) manager.setValue(PREFIX + face, weight);
-      else for (const [name, value] of Object.entries(FACES[face].fallback)) presets[name] = (presets[name] ?? 0) + value * weight;
+      else
+        for (const [name, value] of Object.entries(FACES[face].fallback))
+          presets[name] = (presets[name] ?? 0) + value * weight;
     }
     for (const [name, value] of Object.entries({ ...presets, ...extra })) {
       if (manager.getExpression(name)) manager.setValue(name, Math.min(1, value));
@@ -60,7 +75,10 @@ export class FaceRig {
     const manager = this.vrm.expressionManager;
     for (const face of this.native) {
       const expression = manager?.getExpression(PREFIX + face);
-      if (expression) { manager!.unregisterExpression(expression); expression.removeFromParent(); }
+      if (expression) {
+        manager!.unregisterExpression(expression);
+        expression.removeFromParent();
+      }
     }
   }
 }
